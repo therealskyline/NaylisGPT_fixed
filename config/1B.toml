@@ -21,7 +21,7 @@ attn_head_dim         = 256
 [gdn]
 hybrid_ratio          = 3
 gdn_head_dim          = 128
-gdn_heads_v           = 16
+gdn_v_heads           = 16
 gdn_heads_qk          = 16
 
 [training]
