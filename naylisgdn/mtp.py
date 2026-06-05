@@ -23,16 +23,33 @@ class MTPModule(nn.Module):
         self.proj      = Linear(embed_dim * 2, embed_dim, bias=False)
         self.norm_out  = RMSNorm(embed_dim)
         self.head      = nn.Linear(embed_dim, vocab_size, bias=False)
+        self.use_fp8   = use_fp8 and _TE_AVAILABLE
 
     def forward(
         self,
         hidden: torch.Tensor,
         next_embeds: torch.Tensor,
     ) -> torch.Tensor:
-        h  = self.norm_h(hidden)
-        e  = self.norm_e(next_embeds)
-        x  = self.proj(torch.cat([h, e], dim=-1))
-        x  = self.norm_out(x)
+        h = self.norm_h(hidden)
+        e = self.norm_e(next_embeds)
+
+        inp = torch.cat([h, e], dim=-1)   # [B, T, 2D]
+        B, T, _ = inp.shape
+
+        # FP8 requires B*T divisible by 8 — pad seq dim if needed
+        pad = 0
+        if self.use_fp8:
+            rem = (B * T) % 8
+            if rem != 0:
+                pad = 8 - rem
+                inp = F.pad(inp, (0, 0, 0, pad))
+
+        x = self.proj(inp)                # [B, T+pad, D]
+
+        if pad:
+            x = x[:, :T]                 # remove padding
+
+        x = self.norm_out(x)
         return self.head(x), x
 
 
