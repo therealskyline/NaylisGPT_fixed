@@ -362,7 +362,7 @@ def packed_collate_fn(batch, eos_token_id, seq_len):
             if remaining > 0:
                 all_cu.append(all_cu[-1] + remaining)
                 max_sl = max(max_sl, remaining)
-    return x, y, torch.tensor(all_cu, dtype=torch.int64), max_sl
+    return x, y, torch.tensor(all_cu, dtype=torch.int32), max_sl
 
 
 def _gpu_tflops() -> float:
@@ -589,7 +589,7 @@ def train_epoch(model, optimizers, scheduler, checkpoint_manager, training_histo
                 x, y, cu_seqlens, max_seqlen = batch
                 x          = x.to(device, non_blocking=True)
                 y          = y.to(device, non_blocking=True)
-                cu_seqlens = cu_seqlens.to(device, non_blocking=True)
+                cu_seqlens = cu_seqlens.to(device=device, dtype=torch.int32, non_blocking=True)
             else:
                 x, y       = batch[0].to(device, non_blocking=True), batch[1].to(device, non_blocking=True)
                 cu_seqlens = max_seqlen = None
