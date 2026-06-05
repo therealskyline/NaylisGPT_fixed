@@ -72,7 +72,8 @@ def _gdn2_torch(
     S = initial_state if initial_state is not None else \
         torch.zeros(B, H, d_k, d_v, device=q.device, dtype=q.dtype)
 
-    k = F.normalize(k, p=2, dim=-1)
+    q = F.normalize(q, p=2, dim=-1, eps=1e-6)
+    k = F.normalize(k, p=2, dim=-1, eps=1e-6)
 
     outputs = []
     for t in range(T):
@@ -124,6 +125,7 @@ class GDNBlock(nn.Module):
         use_fp8:     bool  = False,
         head_dim:    Optional[int]  = None,
         v_heads:     Optional[int]  = None,
+        qk_heads:    Optional[int]  = None,
         expand_v:    float = 1.0,
         use_short_conv: bool = False,
         allow_neg_eigval: bool = False,
@@ -131,9 +133,9 @@ class GDNBlock(nn.Module):
         super().__init__()
 
         self.embed_dim   = embed_dim
-        self.num_heads   = num_heads
-        self.head_k_dim  = head_dim if head_dim is not None else (embed_dim // num_heads)
-        self.num_v_heads = v_heads  if v_heads  is not None else num_heads
+        self.num_heads   = qk_heads if qk_heads is not None else num_heads
+        self.head_k_dim  = head_dim if head_dim is not None else (embed_dim // self.num_heads)
+        self.num_v_heads = v_heads  if v_heads  is not None else self.num_heads
         self.expand_v    = expand_v
         self.use_fp8     = use_fp8 and _TE_AVAILABLE
         self.allow_neg_eigval = allow_neg_eigval

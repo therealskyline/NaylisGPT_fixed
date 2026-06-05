@@ -1,20 +1,9 @@
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple
+from typing import Tuple
 
 
 class RotaryPositionalEmbedding(nn.Module):
-    """
-    RoPE avec support du partial rotary factor (Qwen3.5 style).
-
-    Si `rope_dim` < `dim`, la rotation n'est appliquée qu'aux premières
-    `rope_dim` dimensions de q/k ; les dimensions restantes passent sans
-    modification. Cela correspond au `partial_rotary_factor` de Qwen3.5
-    (ex. rope_dim=64 sur head_dim=256 → factor=0.25).
-
-    Si `rope_dim` est None ou égal à `dim`, comportement standard : toutes
-    les dimensions sont rotées (compatibilité ascendante).
-    """
 
     def __init__(
         self,
@@ -22,7 +11,6 @@ class RotaryPositionalEmbedding(nn.Module):
         max_seq_len: int = 2048,
         base: int = 10000,
         rope_base: int = 0,
-        rope_dim: Optional[int] = None,
         device=None,
         use_yarn: bool = False,
         yarn_scale: float = 1.0,
@@ -32,21 +20,15 @@ class RotaryPositionalEmbedding(nn.Module):
         self.dim                   = dim
         self.max_seq_len           = max_seq_len
         self.base                  = rope_base if rope_base > 0 else base
-        self.rope_dim              = rope_dim if rope_dim is not None else dim
         self.use_yarn              = use_yarn
         self.yarn_scale            = yarn_scale
         self.yarn_original_max_len = yarn_original_max_len
-
-        assert self.rope_dim <= dim and self.rope_dim % 2 == 0, \
-            f"rope_dim ({self.rope_dim}) doit être ≤ dim ({dim}) et pair"
 
         if use_yarn:
             assert 0.1 <= yarn_scale <= 16.0
             inv_freq = self._compute_yarn_frequencies()
         else:
-            inv_freq = 1.0 / (
-                self.base ** (torch.arange(0, self.rope_dim, 2).float() / self.rope_dim)
-            )
+            inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
 
         self.register_buffer("inv_freq", inv_freq)
         self._seq_len_cached = None
@@ -54,17 +36,17 @@ class RotaryPositionalEmbedding(nn.Module):
         self._sin_cached     = None
 
     def _compute_yarn_frequencies(self) -> torch.Tensor:
-        freqs         = torch.arange(0, self.rope_dim, 2).float() / self.rope_dim
+        freqs         = torch.arange(0, self.dim, 2).float() / self.dim
         inv_freq_base = 1.0 / (self.base ** freqs)
         if self.yarn_scale == 1.0:
             return inv_freq_base
         alpha = self.yarn_scale
-        beta  = max(self.rope_dim // 2, int(self.rope_dim * 0.25))
-        dims  = torch.arange(0, self.rope_dim, 2).float()
+        beta  = max(self.dim // 2, int(self.dim * 0.25))
+        dims  = torch.arange(0, self.dim, 2).float()
         scale = torch.where(
             dims < beta,
             torch.ones_like(dims),
-            1 + (alpha - 1) * (dims - beta) / (self.rope_dim - beta),
+            1 + (alpha - 1) * (dims - beta) / (self.dim - beta),
         )
         return inv_freq_base / scale
 
@@ -103,23 +85,17 @@ class RotaryPositionalEmbedding(nn.Module):
         cos = cos[position_offset : position_offset + seq_len][None, None, :, :]
         sin = sin[position_offset : position_offset + seq_len][None, None, :, :]
 
-        if self.rope_dim == self.dim:
+        d = self.dim  # rope_dim — peut être < head_dim (partial RoPE)
+        if d == q.shape[-1]:
             return (
                 (q * cos) + (self._rotate_half(q) * sin),
                 (k * cos) + (self._rotate_half(k) * sin),
             )
-
-        q_rot  = q[..., : self.rope_dim]
-        q_pass = q[..., self.rope_dim :]
-        k_rot  = k[..., : self.rope_dim]
-        k_pass = k[..., self.rope_dim :]
-
-        q_out = torch.cat(
-            [(q_rot * cos) + (self._rotate_half(q_rot) * sin), q_pass], dim=-1
-        )
-        k_out = torch.cat(
-            [(k_rot * cos) + (self._rotate_half(k_rot) * sin), k_pass], dim=-1
-        )
+        # Partial RoPE : seules les d premières dimensions sont rotées
+        q_rot, q_pass = q[..., :d], q[..., d:]
+        k_rot, k_pass = k[..., :d], k[..., d:]
+        q_out = torch.cat([(q_rot * cos) + (self._rotate_half(q_rot) * sin), q_pass], dim=-1)
+        k_out = torch.cat([(k_rot * cos) + (self._rotate_half(k_rot) * sin), k_pass], dim=-1)
         return q_out, k_out
 
     def forward(

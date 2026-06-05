@@ -234,9 +234,14 @@ _hf_download()
 # On sonde le chunk 0 s'il existe ; sinon on estime depuis SPLIT_TOKENS = 10B.
 _SPLIT_TOKENS_EST   = 10_000_000_000    # tokens par fichier (doit coller à tokens.py)
 
-# dtype des fichiers .bin : uint16 si vocab ≤ 65 535 (cosmo2=49 152),
-# uint32 sinon (Qwen3=151 936).  Doit rester cohérent avec tokens.py.
-_TOKEN_DTYPE = np.uint16 if CONFIG.get("vocab_size", 100_000) <= 65_535 else np.uint32
+# dtype des fichiers .bin : lu depuis config token_dtype, sinon auto-détecté.
+_dtype_cfg   = CONFIG.get("token_dtype", "auto")
+if _dtype_cfg == "uint16":
+    _TOKEN_DTYPE = np.uint16
+elif _dtype_cfg == "uint32":
+    _TOKEN_DTYPE = np.uint32
+else:
+    _TOKEN_DTYPE = np.uint16 if CONFIG.get("vocab_size", 100_000) <= 65_535 else np.uint32
 
 _seq_len_1          = CONFIG["max_seq_len"] + 1
 _chunk0             = _chunk_path(0)
@@ -259,10 +264,9 @@ if _LOCAL_RANK == 0:
     print(f"\nTOTAL_STEPS = {STEPS_PER_CHUNK:,} steps/chunk × {_N_CHUNKS} chunks "
           f"= {TOTAL_STEPS:,}  ({src})")
 
-if _LOCAL_RANK == 0:
-    print(f"\nLoading tokenizer...")
+print(f"\nLoading tokenizer...")
 _tok_local    = "./tokenizer"
-_tok_cfg_id   = CONFIG.get("model", "Qwen/Qwen2.5-0.5B")   # depuis [tokenizer] du TOML
+_tok_cfg_id   = CONFIG.get("tokenizer_model", CONFIG.get("model", "Qwen/Qwen2.5-0.5B"))
 _tok_src      = _tok_local if os.path.isdir(_tok_local) else _tok_cfg_id
 tokenizer     = AutoTokenizer.from_pretrained(_tok_src, trust_remote_code=True)
 print(f"  source : {_tok_src}")
@@ -358,7 +362,7 @@ def packed_collate_fn(batch, eos_token_id, seq_len):
             if remaining > 0:
                 all_cu.append(all_cu[-1] + remaining)
                 max_sl = max(max_sl, remaining)
-    return x, y, torch.tensor(all_cu, dtype=torch.int32), max_sl
+    return x, y, torch.tensor(all_cu, dtype=torch.int64), max_sl
 
 
 def _gpu_tflops() -> float:
@@ -422,8 +426,8 @@ class CheckpointManager:
 
     def __init__(self, path: str):
         self.path             = path
-        self._last_hf_push    = time.time()
-        self._last_local_save = time.time()
+        self._last_hf_push    = 0.0
+        self._last_local_save = 0.0
         self._save_thread     = None
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
@@ -435,22 +439,22 @@ class CheckpointManager:
         torch.save(cp, tmp)
         os.replace(tmp, self.path)
         os.replace(new_path, json_path)
-        if _HF_TOKEN and _HF_REPO:
+        elapsed = time.time() - self._last_hf_push
+        if _HF_TOKEN and _HF_REPO and elapsed >= _HF_PUSH_INTERVAL:
             hf_push_checkpoint(self.path, step, epoch)
             self._last_hf_push = time.time()
 
-    def push_hf_if_due(self, model, optimizers, scheduler, metadata: dict) -> bool:
-        """Push vers HF si hf_push_interval secondes se sont écoulées.
+    def save_if_due(self, every_hours: float, model, optimizers, scheduler, metadata: dict) -> bool:
+        """Sauvegarde si au moins `every_hours` heures se sont écoulées depuis la dernière.
 
-        Écrit le checkpoint localement (nécessaire pour l'upload) puis push.
-        Retourne True si un push a été déclenché, False sinon.
+        Retourne True si une sauvegarde a été déclenchée, False sinon.
+        Le premier appel sauvegarde toujours (temps écoulé = ∞ par rapport à t=0).
         """
-        if not (_HF_TOKEN and _HF_REPO):
-            return False
-        if time.time() - self._last_hf_push < _HF_PUSH_INTERVAL:
-            return False
-        self.save(model, optimizers, scheduler, metadata)
-        return True
+        if time.time() - self._last_local_save >= every_hours * 3600:
+            self.save(model, optimizers, scheduler, metadata)
+            self._last_local_save = time.time()
+            return True
+        return False
 
     def save(self, model, optimizers, scheduler, metadata: dict):
         if self._save_thread is not None and self._save_thread.is_alive():
@@ -577,8 +581,7 @@ def train_epoch(model, optimizers, scheduler, checkpoint_manager, training_histo
     ae, adt         = device.startswith("cuda"), torch.bfloat16 if device.startswith("cuda") else torch.float32
 
     pbar = tqdm(train_loader, desc=label, leave=True,
-                initial=total_batches - len(train_loader), total=total_batches,
-                file=sys.stdout, dynamic_ncols=True)
+                initial=total_batches - len(train_loader), total=total_batches)
 
     for batch_idx, batch in enumerate(pbar):
         try:
@@ -604,6 +607,12 @@ def train_epoch(model, optimizers, scheduler, checkpoint_manager, training_histo
             accumulated += 1
             is_last = (batch_idx + 1 == len(train_loader))
 
+            raw_t = loss.detach() * CONFIG["gradient_accumulation"]
+            epoch_loss_t    += raw_t
+            running_loss_t  += raw_t
+            valid_batches   += 1
+            running_batches += 1
+
             if accumulated % CONFIG["gradient_accumulation"] == 0 or is_last:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), CONFIG["max_grad_norm"], foreach=True)
                 muon_opt.step()
@@ -614,20 +623,33 @@ def train_epoch(model, optimizers, scheduler, checkpoint_manager, training_histo
                 accumulated  = 0
                 global_step += 1
 
+                _lr   = scheduler.get_last_lr()[0]
+                _loss = (running_loss_t / max(running_batches, 1)).item()
+                pbar.set_postfix(
+                    loss=f"{_loss:.4f}",
+                    ppl=f"{math.exp(min(_loss, 10)):.1f}",
+                    lr=f"{_lr:.2e}",
+                    lr_muon=f"{_lr * 5:.2e}",
+                    step=f"{global_step:,}",
+                )
+
                 if global_step % CONFIG["validate_every_steps"] == 0:
                     val_ppl, val_loss = validate(model, val_loader, CONFIG["val_batches"])
                     avg = (running_loss_t / max(running_batches, 1)).item()
-                    print(f"\n  step={global_step:,} | train={avg:.4f} ppl={math.exp(min(avg,10)):.1f} | "
-                          f"val={val_loss:.4f} ppl={val_ppl:.1f} | lr={scheduler.get_last_lr()[0]:.2e}\n")
+                    tqdm.write(
+                        f"\n  step={global_step:,} | train={avg:.4f} ppl={math.exp(min(avg,10)):.1f} | "
+                        f"val={val_loss:.4f} ppl={val_ppl:.1f} | lr={_lr:.2e}  lr_muon={_lr*5:.2e}\n"
+                    )
                     training_history["validations"].append({
                         "step": global_step, "current_epoch": current_epoch,
                         "val_loss": val_loss, "val_ppl": val_ppl,
-                        "train_loss": avg, "lr": scheduler.get_last_lr()[0],
+                        "train_loss": avg, "lr": _lr,
                     })
                     running_loss_t  = torch.zeros(1, device=device)
                     running_batches = 0
 
-                checkpoint_manager.push_hf_if_due(
+                checkpoint_manager.save_if_due(
+                    CONFIG.get("save_every_hours", 1.0),
                     model, optimizers, scheduler,
                     metadata={
                         "current_epoch":       current_epoch,
@@ -636,30 +658,14 @@ def train_epoch(model, optimizers, scheduler, checkpoint_manager, training_histo
                         "skip_batches":        batch_idx + 1,
                         "total_training_time": total_training_time + (time.time() - t_start),
                         "training_history":    training_history,
-                        "actual_chunk_done":   actual_chunk_done,   # chunks entièrement terminés
-                        "current_chunk_idx":   chunk_idx,           # chunk en cours
+                        "actual_chunk_done":   actual_chunk_done,
+                        "current_chunk_idx":   chunk_idx,
                     },
-                )
-
-            raw_t = loss.detach() * CONFIG["gradient_accumulation"]
-            epoch_loss_t    += raw_t
-            running_loss_t  += raw_t
-            valid_batches   += 1
-            running_batches += 1
-
-            if batch_idx % 20 == 0 and _LOCAL_RANK == 0:
-                raw_f = raw_t.item()
-                avg   = (running_loss_t / max(running_batches, 1)).item()
-                lr_now = scheduler.get_last_lr()[0]
-                pbar.set_postfix(
-                    loss=f"{raw_f:.4f}", avg=f"{avg:.4f}",
-                    ppl=f"{math.exp(min(avg,10)):.1f}",
-                    lr=f"{lr_now:.2e}", step=f"{global_step:,}",
                 )
 
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
-                print(f"\n  OOM batch {batch_idx} — skip")
+                tqdm.write(f"\n  OOM batch {batch_idx} — skip")
                 torch.cuda.empty_cache()
                 muon_opt.zero_grad(set_to_none=True)
                 adamw_opt.zero_grad(set_to_none=True)
@@ -699,6 +705,7 @@ def main():
         hybrid_ratio=CONFIG.get("hybrid_ratio", 3),
         gdn_head_dim=CONFIG.get("gdn_head_dim", None),
         gdn_v_heads=CONFIG.get("gdn_v_heads", None),
+        gdn_qk_heads=CONFIG.get("gdn_heads_qk", None),
         attn_head_dim=CONFIG.get("attn_head_dim", None),
         rope_dim=CONFIG.get("rope_dim", None),
         use_moe=CONFIG.get("use_moe", False),

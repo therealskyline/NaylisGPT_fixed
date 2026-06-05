@@ -6,15 +6,12 @@ from transformers import AutoTokenizer
 from datasets import load_dataset
 from tqdm import tqdm
 
-TOKENIZER_ID    = "Qwen/Qwen2.5-0.5B"
-TOKENIZER_LOCAL = Path("tokenizer")
-
-# uint32 obligatoire : vocab Qwen2.5 = 151 667 > 65 535 (limite uint16)
-DTYPE = np.uint32
+DEFAULT_TOKENIZER_ID = "HuggingFaceTB/cosmo2-tokenizer"
+TOKENIZER_LOCAL      = Path("tokenizer")
 
 
-def load_tokenizer() -> AutoTokenizer:
-    src = str(TOKENIZER_LOCAL) if TOKENIZER_LOCAL.exists() else TOKENIZER_ID
+def load_tokenizer(tokenizer_id: str) -> AutoTokenizer:
+    src = str(TOKENIZER_LOCAL) if TOKENIZER_LOCAL.exists() else tokenizer_id
     print(f"Tokenizer : {src}")
     tok = AutoTokenizer.from_pretrained(src, trust_remote_code=True)
 
@@ -30,23 +27,38 @@ def load_tokenizer() -> AutoTokenizer:
     else:
         print(f"  ✓ Tokens <think></think> déjà présents")
 
-    print(f"  vocab={len(tok):,}  eos={tok.eos_token_id}  dtype=uint32")
     return tok
 
 
+def resolve_dtype(dtype_arg: str, vocab_size: int) -> np.dtype:
+    if dtype_arg == "uint16":
+        return np.uint16
+    if dtype_arg == "uint32":
+        return np.uint32
+    return np.uint16 if vocab_size <= 65_535 else np.uint32
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Prépare pretrain_data.bin (Qwen2.5, uint32)")
-    parser.add_argument("--dataset",  type=str, required=True)
-    parser.add_argument("--output",   type=str, default="./pretrain_data.bin")
-    parser.add_argument("--split",    type=str, default="train")
-    parser.add_argument("--column",   type=str, default="text")
-    parser.add_argument("--limit",    type=int, default=None)
-    parser.add_argument("--hf-token", type=str, default=None)
+    parser = argparse.ArgumentParser(description="Prépare pretrain_data.bin")
+    parser.add_argument("--dataset",    type=str, required=True)
+    parser.add_argument("--output",     type=str, default="./pretrain_data.bin")
+    parser.add_argument("--split",      type=str, default="train")
+    parser.add_argument("--column",     type=str, default="text")
+    parser.add_argument("--limit",      type=int, default=None)
+    parser.add_argument("--hf-token",   type=str, default=None)
+    parser.add_argument("--tokenizer",  type=str, default=DEFAULT_TOKENIZER_ID,
+                        help="HuggingFace tokenizer ID ou chemin local")
+    parser.add_argument("--dtype",      type=str, default="auto",
+                        choices=["auto", "uint16", "uint32"],
+                        help="dtype du fichier .bin (auto = déduit du vocab)")
     args = parser.parse_args()
 
-    tokenizer = load_tokenizer()
-    eos = tokenizer.eos_token_id
+    tokenizer  = load_tokenizer(args.tokenizer)
+    vocab_size = len(tokenizer)
+    DTYPE      = resolve_dtype(args.dtype, vocab_size)
+    eos        = tokenizer.eos_token_id
 
+    print(f"  vocab={vocab_size:,}  eos={eos}  dtype={DTYPE.__name__}")
     print(f"\nDataset : {args.dataset}  split={args.split}")
     ds = load_dataset(args.dataset, split=args.split,
                       token=args.hf_token, streaming=True)

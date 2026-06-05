@@ -17,7 +17,6 @@ class TransformerBlock(nn.Module):
         use_rope: bool = True,
         max_seq_len: int = 2048,
         rope_base: int = 10000,
-        rope_dim: Optional[int] = None,
         use_yarn: bool = False,
         yarn_scale: float = 1.0,
         yarn_original_max_len: int = 1024,
@@ -37,6 +36,7 @@ class TransformerBlock(nn.Module):
         use_moh: bool = False,
         moh_shared_heads: Optional[int] = None,
         moh_top_k_routed: Optional[int] = None,
+        rope_dim: Optional[int] = None,
     ):
         super().__init__()
 
@@ -53,7 +53,7 @@ class TransformerBlock(nn.Module):
             self.attention = MixtureOfHeads(
                 embed_dim, num_heads, shared_heads=sh, top_k_routed=kr,
                 dropout=dropout, use_rope=use_rope, max_seq_len=max_seq_len,
-                rope_base=rope_base, rope_dim=rope_dim,
+                rope_base=rope_base,
                 use_yarn=use_yarn, yarn_scale=yarn_scale,
                 yarn_original_max_len=yarn_original_max_len,
                 n_kv_heads=n_kv_heads, use_qk_norm=use_qk_norm,
@@ -64,12 +64,13 @@ class TransformerBlock(nn.Module):
             self.attention = MultiHeadAttention(
                 embed_dim, num_heads, dropout,
                 use_rope=use_rope, max_seq_len=max_seq_len,
-                rope_base=rope_base, rope_dim=rope_dim,
+                rope_base=rope_base,
                 use_yarn=use_yarn, yarn_scale=yarn_scale,
                 yarn_original_max_len=yarn_original_max_len,
                 n_kv_heads=n_kv_heads, use_qk_norm=use_qk_norm,
                 use_flash_attn=use_flash_attn, soft_cap=soft_cap,
                 use_fp8=use_fp8, head_dim=attn_head_dim,
+                rope_dim=rope_dim,
             )
 
         self.ln2 = RMSNorm(embed_dim)

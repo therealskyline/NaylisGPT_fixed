@@ -7,5 +7,5 @@ tomli>=2.0.0
 tqdm>=4.66.0
 numpy>=1.26.0
 liger-kernel>=0.5.0
-flash-linear-attention
+flash-linear-attention>=0.7.0
 einops>=0.7.0

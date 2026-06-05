@@ -21,11 +21,12 @@ class WSDScheduler:
         self.decay_steps  = int(total_steps * decay_ratio)
         self.stable_steps = total_steps - self.warmup_steps - self.decay_steps
         self.current_step = 0
+        self._last_lr     = 0.0
 
     def get_lr(self) -> float:
         s = self.current_step
         if s < self.warmup_steps:
-            return self.max_lr * (s / max(self.warmup_steps, 1))
+            return self.max_lr * ((s + 1) / max(self.warmup_steps, 1))
         elif s < self.warmup_steps + self.stable_steps:
             return self.max_lr
         else:
@@ -35,6 +36,7 @@ class WSDScheduler:
 
     def step(self) -> float:
         lr = self.get_lr()
+        self._last_lr      = lr
         self.current_step += 1
         for opt in self.optimizers:
             for pg in opt.param_groups:
@@ -42,10 +44,11 @@ class WSDScheduler:
         return lr
 
     def get_last_lr(self) -> List[float]:
-        return [self.get_lr()]
+        return [self._last_lr]
 
     def state_dict(self) -> dict:
-        return {"current_step": self.current_step}
+        return {"current_step": self.current_step, "_last_lr": self._last_lr}
 
     def load_state_dict(self, sd: dict):
         self.current_step = sd["current_step"]
+        self._last_lr     = sd.get("_last_lr", 0.0)

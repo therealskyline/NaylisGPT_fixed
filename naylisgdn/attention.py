@@ -74,7 +74,6 @@ class MultiHeadAttention(nn.Module):
         use_rope: bool = True,
         max_seq_len: int = 2048,
         rope_base: int = 10000,
-        rope_dim: Optional[int] = None,
         use_yarn: bool = False,
         yarn_scale: float = 1.0,
         yarn_original_max_len: int = 1024,
@@ -84,6 +83,7 @@ class MultiHeadAttention(nn.Module):
         soft_cap: Optional[float] = None,
         use_fp8: bool = False,
         head_dim: Optional[int] = None,
+        rope_dim: Optional[int] = None,
     ):
         super().__init__()
         if head_dim is None:
@@ -121,10 +121,10 @@ class MultiHeadAttention(nn.Module):
             self.q_norm = self.k_norm = None
 
         if use_rope:
+            _rope_dim = rope_dim if rope_dim is not None else self.head_dim
             self.rope = RotaryPositionalEmbedding(
-                self.head_dim, max_seq_len,
+                _rope_dim, max_seq_len,
                 rope_base=rope_base,
-                rope_dim=rope_dim,
                 use_yarn=use_yarn,
                 yarn_scale=yarn_scale,
                 yarn_original_max_len=yarn_original_max_len,

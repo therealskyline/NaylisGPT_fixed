@@ -17,44 +17,21 @@ def _ffn_hidden(embed_dim: int, multiple_of: int = 64) -> int:
     return ((raw + multiple_of - 1) // multiple_of) * multiple_of
 
 
-def _gdn_block_params(
-    embed_dim: int,
-    num_heads: int,
-    gdn_head_dim: int,
-    gdn_v_heads: int = 0,
-) -> int:
-    """
-    Compte tous les paramètres d'un GDNBlock (fidèle à gdn_block.py) :
-      q_proj, k_proj, v_proj, f_proj (×2), b_proj, w_proj, g_proj (×2+bias),
-      o_proj, A_log, dt_bias, o_norm, norm1, norm2, FFN.
-    """
-    head_k_dim = gdn_head_dim
-    head_v_dim = gdn_head_dim          # expand_v=1.0 par défaut
-    qk_heads   = num_heads
+def _gdn_block_params(embed_dim: int, gdn_head_dim: int, gdn_v_heads: int = 0) -> int:
+    qk_heads   = embed_dim // gdn_head_dim
+    qk_dim     = qk_heads * gdn_head_dim
     v_heads    = gdn_v_heads if gdn_v_heads else qk_heads
-    key_dim    = qk_heads * head_k_dim
-    value_dim  = v_heads  * head_v_dim
-
-    q_proj  = embed_dim * key_dim
-    k_proj  = embed_dim * key_dim
-    v_proj  = embed_dim * value_dim
-    f_proj  = embed_dim * head_v_dim + head_v_dim * key_dim   # 2 linéaires
-    b_proj  = embed_dim * key_dim
-    w_proj  = embed_dim * value_dim
-    g_proj  = embed_dim * head_v_dim + head_v_dim * value_dim + value_dim  # +biais
-    o_proj  = value_dim * embed_dim
-    A_log   = qk_heads                 # nn.Parameter [num_heads]
-    dt_bias = key_dim                  # nn.Parameter [key_dim]
-    o_norm  = head_v_dim               # RMSNorm weight [head_v_dim]
-
-    mixer_params = (q_proj + k_proj + v_proj + f_proj + b_proj
-                    + w_proj + g_proj + o_proj + A_log + dt_bias + o_norm)
-
+    v_dim      = v_heads * gdn_head_dim
+    attn_params = (
+        2 * embed_dim * qk_dim +
+        2 * embed_dim * v_dim  +
+        v_dim * embed_dim
+    )
     ffn_hidden  = _ffn_hidden(embed_dim)
-    ffn_params  = 3 * embed_dim * ffn_hidden          # SwiGLU : gate+up+down
-    norm_params = 2 * embed_dim                        # norm1 + norm2
-
-    return mixer_params + ffn_params + norm_params
+    ffn_params  = 2 * embed_dim * ffn_hidden + ffn_hidden * embed_dim
+    norm_params = 2 * embed_dim
+    beta_params = qk_heads
+    return attn_params + ffn_params + norm_params + beta_params
 
 
 def _gpt_block_params(
@@ -126,7 +103,7 @@ def compute(cfg: dict) -> dict:
     gdn_v_heads   = cfg.get("gdn_v_heads", 0)
     attn_head_dim = cfg.get("attn_head_dim", 0)
 
-    gdn_per     = _gdn_block_params(embed_dim, num_heads, gdn_head_dim, gdn_v_heads)
+    gdn_per     = _gdn_block_params(embed_dim, gdn_head_dim, gdn_v_heads)
     gdn_total   = num_gdn * gdn_per
 
     gpt_per     = _gpt_block_params(

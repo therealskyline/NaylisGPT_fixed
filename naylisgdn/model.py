@@ -41,11 +41,12 @@ class NaylisGDN(nn.Module):
         soft_cap: Optional[float] = None,
         use_flash_attn: bool = True,
         use_fp8: bool = False,
-        rope_dim: Optional[int] = None,
         hybrid_ratio: int = 3,
         gdn_head_dim: Optional[int] = None,
         gdn_v_heads: Optional[int] = None,
+        gdn_qk_heads: Optional[int] = None,
         attn_head_dim: Optional[int] = None,
+        rope_dim: Optional[int] = None,
         use_moe: bool = False,
         num_experts: int = 16,
         top_k_experts: int = 2,
@@ -86,11 +87,12 @@ class NaylisGDN(nn.Module):
         self.soft_cap              = soft_cap
         self.use_flash_attn        = use_flash_attn
         self.use_fp8               = use_fp8
-        self.rope_dim              = rope_dim
         self.hybrid_ratio          = hybrid_ratio
         self.gdn_head_dim          = gdn_head_dim if gdn_head_dim is not None else (embed_dim // num_heads)
         self.gdn_v_heads           = gdn_v_heads
+        self.gdn_qk_heads          = gdn_qk_heads
         self.attn_head_dim         = attn_head_dim
+        self.rope_dim              = rope_dim
         self.use_moe               = use_moe
         self.use_moh               = use_moh
         self.moe_aux_coeff         = moe_aux_coeff
@@ -110,7 +112,7 @@ class NaylisGDN(nn.Module):
                 self.blocks.append(TransformerBlock(
                     embed_dim, num_heads, dropout,
                     use_rope=use_rope, max_seq_len=max_seq_len,
-                    rope_base=rope_base, rope_dim=rope_dim,
+                    rope_base=rope_base,
                     use_yarn=use_yarn, yarn_scale=yarn_scale,
                     yarn_original_max_len=yarn_original_max_len,
                     use_swiglu=use_swiglu, n_kv_heads=n_kv_heads,
@@ -124,6 +126,7 @@ class NaylisGDN(nn.Module):
                     use_moh=use_moh,
                     moh_shared_heads=moh_shared_heads,
                     moh_top_k_routed=moh_top_k_routed,
+                    rope_dim=rope_dim,
                 ))
                 self.block_types.append("gpt")
             else:
@@ -132,6 +135,7 @@ class NaylisGDN(nn.Module):
                     use_swiglu=use_swiglu, use_fp8=use_fp8,
                     head_dim=self.gdn_head_dim,
                     v_heads=gdn_v_heads,
+                    qk_heads=gdn_qk_heads,
                 ))
                 self.block_types.append("gdn")
 
@@ -169,6 +173,8 @@ class NaylisGDN(nn.Module):
         self.gradient_checkpointing = False
 
     def _init_weights(self, module):
+        if getattr(module, "_is_hf_initialized", False):
+            return
         try:
             import transformer_engine.pytorch as te
             if isinstance(module, te.Linear):
@@ -186,8 +192,7 @@ class NaylisGDN(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
         elif isinstance(module, RMSNorm):
-            if hasattr(module, "weight"):
-                nn.init.ones_(module.weight)
+            nn.init.ones_(module.weight)
 
     def enable_gradient_checkpointing(self):
         self.gradient_checkpointing = True
@@ -437,7 +442,6 @@ class NaylisGDN(nn.Module):
             "soft_cap":              self.soft_cap,
             "use_flash_attn":        self.use_flash_attn,
             "use_fp8":               self.use_fp8,
-            "rope_dim":              self.rope_dim,
             "hybrid_ratio":          self.hybrid_ratio,
             "gdn_head_dim":          self.gdn_head_dim,
             "use_moe":               self.use_moe,

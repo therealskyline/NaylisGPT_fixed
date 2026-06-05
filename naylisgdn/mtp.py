@@ -23,40 +23,16 @@ class MTPModule(nn.Module):
         self.proj      = Linear(embed_dim * 2, embed_dim, bias=False)
         self.norm_out  = RMSNorm(embed_dim)
         self.head      = nn.Linear(embed_dim, vocab_size, bias=False)
-        self.use_fp8   = use_fp8 and _TE_AVAILABLE
 
-    # Disabled from torch.compile: the FP8 padding loop uses Python-level
-    # control flow on dynamic tensor dims (B, T), which causes graph breaks
-    # and repeated recompilation under dynamo. Running MTP in eager is fine —
-    # it is a tiny auxiliary module (≤73 M params, mtp_steps=1).
-    @torch._dynamo.disable
     def forward(
         self,
         hidden: torch.Tensor,
         next_embeds: torch.Tensor,
     ) -> torch.Tensor:
-        h = self.norm_h(hidden)
-        e = self.norm_e(next_embeds)
-
-        inp = torch.cat([h, e], dim=-1)   # [B, T, 2D]
-        B, T, _ = inp.shape
-
-        # FP8 requires B*T divisible by 8.
-        # We search for the smallest pad >= 0 s.t. B*(T+pad) % 8 == 0.
-        # Maximum 7 iterations; runs in eager (dynamo disabled above).
-        pad = 0
-        if self.use_fp8 and (B * T) % 8 != 0:
-            for pad in range(1, 9):
-                if (B * (T + pad)) % 8 == 0:
-                    break
-            inp = F.pad(inp, (0, 0, 0, pad))
-
-        x = self.proj(inp)                # [B, T+pad, D]
-
-        if pad:
-            x = x[:, :T]                 # remove padding
-
-        x = self.norm_out(x)
+        h  = self.norm_h(hidden)
+        e  = self.norm_e(next_embeds)
+        x  = self.proj(torch.cat([h, e], dim=-1))
+        x  = self.norm_out(x)
         return self.head(x), x
 
 
@@ -87,7 +63,7 @@ class MultiTokenPrediction(nn.Module):
     ) -> torch.Tensor:
         B, T, D     = hidden.shape
         ignore      = pad_token_id if pad_token_id is not None else -100
-        total_loss  = torch.zeros(1, device=hidden.device, dtype=torch.float32)
+        total_loss  = torch.zeros(1, device=hidden.device, dtype=hidden.dtype)
 
         h = hidden.detach()
 

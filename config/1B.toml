@@ -13,7 +13,6 @@ yarn_scale            = 4.0
 yarn_original_max_len = 4096
 use_swiglu            = true
 n_kv_heads            = 2
-mtp_steps             = 1
 use_qk_norm           = true
 soft_cap              = 0
 use_flash_attn        = true
@@ -22,7 +21,8 @@ attn_head_dim         = 256
 [gdn]
 hybrid_ratio          = 3
 gdn_head_dim          = 128
-gdn_v_heads           = 16
+gdn_heads_v           = 16
+gdn_heads_qk          = 16
 
 [training]
 batch_size            = 32
@@ -50,6 +50,7 @@ min_lr_ratio   = 0.1
 data_file      = "./pretrain_data.bin"
 val_tokens     = 20_000_000
 use_packing    = true
+token_dtype    = "uint16"
 
 [checkpoint]
 checkpoint_file      = "./Model/NaylisGDN_1B_pretrain.pt"
@@ -65,5 +66,5 @@ hf_repo          = "silyan/Naylis1-1B"
 hf_push_interval = 1800
 
 [tokenizer]
-model          = "HuggingFaceTB/cosmo2-tokenizer"
-special_tokens = []
+tokenizer_model = "HuggingFaceTB/cosmo2-tokenizer"
+special_tokens  = []
