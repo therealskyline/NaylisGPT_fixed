@@ -34,7 +34,7 @@ import torch
 torch.set_float32_matmul_precision("high")
 
 from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
 try:
@@ -579,11 +579,8 @@ def train_epoch(model, optimizers, scheduler, checkpoint_manager, training_histo
     accumulated     = 0
     t_start         = time.time()
     ae, adt         = device.startswith("cuda"), torch.bfloat16 if device.startswith("cuda") else torch.float32
-    _lr             = scheduler.get_lr()
-    _loss           = 0.0
-    _batch_loss     = 0.0
-
-    pbar = tqdm(train_loader, desc=label, leave=True,
+    short_desc = f"Chunk {chunk_idx+1}/{_N_CHUNKS}"
+    pbar = tqdm(train_loader, desc=short_desc, leave=True, dynamic_ncols=True,
                 initial=total_batches - len(train_loader), total=total_batches)
 
     for batch_idx, batch in enumerate(pbar):
@@ -616,13 +613,17 @@ def train_epoch(model, optimizers, scheduler, checkpoint_manager, training_histo
             valid_batches   += 1
             running_batches += 1
 
-            _batch_loss = raw_t.item()
-            _avg_loss   = (running_loss_t / max(running_batches, 1)).item()
-            _ppl        = math.exp(min(_avg_loss, 10))
-            pbar.set_postfix_str(
-                f"loss={_batch_loss:.4f} avg={_avg_loss:.4f} ppl={_ppl:.1f}"
-                f" lr={_lr:.2e} s={global_step} [{accumulated}/{CONFIG['gradient_accumulation']}]"
-            )
+            if batch_idx % 20 == 0:
+                raw_f = raw_t.item()
+                avg   = (running_loss_t / max(running_batches, 1)).item()
+                _lr_now = scheduler.get_last_lr()[0]
+                pbar.set_postfix(
+                    loss=f"{raw_f:.3f}",
+                    avg=f"{avg:.3f}",
+                    lr=f"{_lr_now:.2e}",
+                    s=global_step,
+                    refresh=False,
+                )
 
             if accumulated % CONFIG["gradient_accumulation"] == 0 or is_last:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), CONFIG["max_grad_norm"], foreach=True)
@@ -634,15 +635,8 @@ def train_epoch(model, optimizers, scheduler, checkpoint_manager, training_histo
                 accumulated  = 0
                 global_step += 1
 
-                _lr   = scheduler.get_last_lr()[0]
-                _loss = (running_loss_t / max(running_batches, 1)).item()
-                _ppl  = math.exp(min(_loss, 10))
-                pbar.set_postfix_str(
-                    f"loss={_batch_loss:.4f} avg={_loss:.4f} ppl={_ppl:.1f}"
-                    f" lr={_lr:.2e} lr_m={_lr*5:.2e} s={global_step}"
-                )
-
                 if global_step % CONFIG["validate_every_steps"] == 0:
+                    _lr = scheduler.get_last_lr()[0]
                     val_ppl, val_loss = validate(model, val_loader, CONFIG["val_batches"])
                     avg = (running_loss_t / max(running_batches, 1)).item()
                     tqdm.write(
