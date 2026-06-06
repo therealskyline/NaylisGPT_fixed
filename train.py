@@ -426,7 +426,7 @@ class CheckpointManager:
 
     def __init__(self, path: str):
         self.path             = path
-        self._last_hf_push    = 0.0
+        self._last_hf_push    = time.time()
         self._last_local_save = 0.0
         self._save_thread     = None
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -579,6 +579,9 @@ def train_epoch(model, optimizers, scheduler, checkpoint_manager, training_histo
     accumulated     = 0
     t_start         = time.time()
     ae, adt         = device.startswith("cuda"), torch.bfloat16 if device.startswith("cuda") else torch.float32
+    _lr             = scheduler.get_lr()
+    _loss           = 0.0
+    _batch_loss     = 0.0
 
     pbar = tqdm(train_loader, desc=label, leave=True,
                 initial=total_batches - len(train_loader), total=total_batches)
@@ -613,6 +616,14 @@ def train_epoch(model, optimizers, scheduler, checkpoint_manager, training_histo
             valid_batches   += 1
             running_batches += 1
 
+            _batch_loss = raw_t.item()
+            _avg_loss   = (running_loss_t / max(running_batches, 1)).item()
+            _ppl        = math.exp(min(_avg_loss, 10))
+            pbar.set_postfix_str(
+                f"loss={_batch_loss:.4f} avg={_avg_loss:.4f} ppl={_ppl:.1f}"
+                f" lr={_lr:.2e} s={global_step} [{accumulated}/{CONFIG['gradient_accumulation']}]"
+            )
+
             if accumulated % CONFIG["gradient_accumulation"] == 0 or is_last:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), CONFIG["max_grad_norm"], foreach=True)
                 muon_opt.step()
@@ -625,12 +636,10 @@ def train_epoch(model, optimizers, scheduler, checkpoint_manager, training_histo
 
                 _lr   = scheduler.get_last_lr()[0]
                 _loss = (running_loss_t / max(running_batches, 1)).item()
-                pbar.set_postfix(
-                    loss=f"{_loss:.4f}",
-                    ppl=f"{math.exp(min(_loss, 10)):.1f}",
-                    lr=f"{_lr:.2e}",
-                    lr_muon=f"{_lr * 5:.2e}",
-                    step=f"{global_step:,}",
+                _ppl  = math.exp(min(_loss, 10))
+                pbar.set_postfix_str(
+                    f"loss={_batch_loss:.4f} avg={_loss:.4f} ppl={_ppl:.1f}"
+                    f" lr={_lr:.2e} lr_m={_lr*5:.2e} s={global_step}"
                 )
 
                 if global_step % CONFIG["validate_every_steps"] == 0:
