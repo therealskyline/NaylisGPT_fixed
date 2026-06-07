@@ -48,10 +48,20 @@ Cet audit porte sur l'architecture, la stabilité et la performance du modèle h
 **Impact :** `SDPA` ne connaît pas les `cu_seqlens`. Le Doc B pourra "voir" le Doc A à travers l'attention causale standard.
 **Test :** `debugue_test/test_attention_leakage.py` a confirmé la fuite.
 
+### ⚠️ Instabilité Numérique du GDN-2 (État Récurrent)
+**Problème :** La récurrence linéaire accumule des valeurs sur de longues séquences. L'implémentation actuelle utilise le dtype d'entrée (BF16).
+**Impact :** Une dérive numérique massive.
+**Test :** `debugue_test/test_numerical_stability.py` a montré une erreur **55 000 fois plus élevée** en BF16 par rapport au FP32 sur seulement 128 tokens. Sur 8192 tokens, le gradient risque d'exploser ou de s'annuler par pur bruit numérique.
+
+### ⚠️ Incompatibilité Muon + FSDP
+**Problème :** Muon effectue une orthogonalisation via Newton-Schulz sur `p.grad`. En FSDP `FULL_SHARD`, `p.grad` n'est qu'un shard local.
+**Impact :** L'orthogonalisation d'un shard ne préserve pas l'orthogonalité de la matrice complète. Muon perd son avantage théorique et peut même diverger.
+
 ---
 
 ## 4. Points de Performance Suspects
 
+- **Boucle séquentielle MoE (naylisgdn/moe.py) :** Le forward de `SparseMoE` boucle sur chaque expert (`for i, expert in enumerate(self.experts)`). Pour un modèle 1B+ avec 16 experts, c'est un goulot d'étranglement majeur.
 - **einops.repeat dans GDNBlock :** L'utilisation de `einops.repeat` dans la boucle de forward (Ligne 198) pour matcher les têtes QK et V peut ralentir le kernel Triton si celui-ci n'est pas déjà optimisé pour le GQA interne au GDN.
 - **Calcul log-decay :** Le calcul `_compute_log_decay` force un cast en `.float()` (fp32). C'est nécessaire pour la stabilité mais coûteux sur Hopper si fait trop souvent hors du kernel.
 - **CPU Fallback :** Les kernels Triton GDN-2 n'ont pas de fallback optimisé en C++/CUDA pur, seulement un fallback PyTorch très lent (`_gdn2_torch`). Sur un nœud sans Triton fonctionnel, l'entraînement sera 50x plus lent.
@@ -68,6 +78,7 @@ Cet audit porte sur l'architecture, la stabilité et la performance du modèle h
 
 ## 6. Suggestions Précises de Corrections
 
+0.  **Précision GDN :** Forcer l'état récurrent `S` en `fp32` dans `_gdn2_torch` pour stopper la dérive numérique, même si le reste du bloc est en BF16.
 1.  **RoPE :** Modifier `RotaryPositionalEmbedding.forward` pour accepter un tenseur `position_ids` optionnel, généré dans `train.py` ou `model.py` à partir des `cu_seqlens`.
 2.  **Attention :** Dans `MultiHeadAttention.forward`, si `cu_seqlens` est fourni mais `use_varlen` est False (fallback), générer un masque 2D 4D `[B, 1, T, T]` bloquant les attentions inter-documents.
 3.  **FSDP :**
